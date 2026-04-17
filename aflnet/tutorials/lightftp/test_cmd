@@ -1,0 +1,1 @@
+/home/ADFuzz/aflnet/afl-fuzz -i in-ftp/ -o out_dir -P FTP -D 10000 -m none -q 3 -s 3 -E -K -d -x ftp.dict -N tcp://127.0.0.1/2200 -c ./ftpclean.sh -L -- ./LightFTP/Source/Release/fftp ./fftp.conf 2200

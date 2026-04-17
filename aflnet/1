@@ -1,0 +1,10 @@
+#python path
+python path:/usr/bin/python3.8
+#AI model args
+model args:python /home/ADFuzz/ganomaly/train.py --dataset testMain --dataroot /home/out_dir/ --batchsize 32 --nc 1 --isize 64 --niter 20 --device gpu --nz 100 NULL
+#weight path
+weight path:/home/ADFuzz/aflnet/tutorials/lightftp/output/ganomaly/testMain/domain.txt
+#collect datasets numbers
+train numbers:1000
+
+

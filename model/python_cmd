@@ -1,0 +1,2 @@
+python3 train.py  --dataset testMain --batchsize 32 --nc 1 --isize 32 --niter 10 --nz 100
+python3 train.py  --dataset testMain --batchsize 32 --nc 1 --isize 32 --niter 10 --nz 100
