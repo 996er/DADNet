@@ -263,7 +263,7 @@ void parse_config(){
 	int lines = 0;
 	struct ConfigInfo *info = NULL;
     char* temp;
-    if(loadFile_ConfigFile("/tmp/ADFuzz/aflnet/config.ini", &fileData, &lines)){
+    if(loadFile_ConfigFile("/home/ubuntu/DADNet/aflnet/config.ini", &fileData, &lines)){
         PFATAL("Cant open config.ini");
     }
     parseFile_ConfigFile(fileData, lines, &info);
