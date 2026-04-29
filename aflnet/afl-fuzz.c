@@ -880,6 +880,7 @@ static void adaptive_reset_staging_training_distribution(void);
 static void adaptive_record_training_sample(u32 path_hash);
 static void adaptive_commit_training_distribution(void);
 static void adaptive_record_gain(u8 useful);
+static u8 adaptive_metrics_enabled(void);
 static double adaptive_marginal_gain(void);
 static double adaptive_path_jsd(void);
 static double adaptive_novel_false_drop_rate(void);
@@ -898,6 +899,12 @@ static u8 adaptive_coin_flip(double probability) {
 
   probability = adaptive_clamp_unit(probability);
   return UR(10000) < (u32)(probability * 10000.0);
+
+}
+
+static u8 adaptive_metrics_enabled(void) {
+
+  return adaptive_online_enable || adaptive_gate_enable;
 
 }
 
@@ -997,7 +1004,7 @@ static void adaptive_record_hist_sample(adaptive_hist_entry_t *hist, u32 *hist_c
 
 static void adaptive_record_training_sample(u32 path_hash) {
 
-  if (!adaptive_gate_initialized) return;
+  if (!adaptive_gate_initialized || !adaptive_online_enable) return;
   adaptive_record_hist_sample(adaptive_staging_training_hist,
                               &adaptive_staging_training_hist_count, path_hash);
 
@@ -1005,7 +1012,7 @@ static void adaptive_record_training_sample(u32 path_hash) {
 
 static void adaptive_commit_training_distribution(void) {
 
-  if (!adaptive_gate_initialized) return;
+  if (!adaptive_gate_initialized || !adaptive_online_enable) return;
 
   /* A committed histogram means "this is what the currently deployed model was
      trained on". Retraining triggers compare live traffic against this frozen
@@ -1022,7 +1029,7 @@ static void adaptive_commit_training_distribution(void) {
 
 static void adaptive_record_gain(u8 useful) {
 
-  if (!adaptive_gate_initialized || !retrain_gain_window) return;
+  if (!adaptive_gate_initialized || !adaptive_online_enable || !retrain_gain_window) return;
 
   /* Marginal gain tracks how much useful coverage survives after filtering.
      We store it in a fixed-size ring buffer so that only recent gain matters
@@ -1266,6 +1273,7 @@ static double adaptive_path_jsd(void) {
   adaptive_hist_entry_t *recent_hist;
   u32 recent_window = retrain_recent_path_window;
 
+  if (!adaptive_online_enable) return 0.0;
   if (!adaptive_training_hist_count || !adaptive_exec_count) return 0.0;
   if (!recent_window || recent_window > adaptive_exec_count) recent_window = adaptive_exec_count;
   if (!recent_window) return 0.0;
@@ -1351,7 +1359,7 @@ static double adaptive_target_filter_ratio(void) {
   double validation_precision;
   double high_freq_precision;
 
-  if (!adaptive_gate_initialized) return 0.0;
+  if (!adaptive_gate_initialized || !adaptive_gate_enable) return 0.0;
   if (!adaptive_exec_count) return ratio;
 
   topk_ratio = adaptive_topk_ratio_for_range(0, adaptive_exec_count);
@@ -1385,7 +1393,7 @@ static void adaptive_record_execution(u32 path_hash, u8 new_edges) {
 
   adaptive_exec_record_t *slot;
 
-  if (!adaptive_gate_initialized) return;
+  if (!adaptive_gate_initialized || !adaptive_metrics_enabled()) return;
 
   /* Every executed testcase contributes one record to the recent window. This
      window is the common data source for edge-rate checks, top-K occupancy,
@@ -1412,6 +1420,8 @@ static void adaptive_adjust_filter_ratio(void) {
   double hf_fp_risk = adaptive_high_freq_false_positive_risk();
   double novel_fp_risk = adaptive_novel_false_drop_rate();
 
+  if (!adaptive_gate_enable) return;
+
   /* False-positive risk should degrade the filter smoothly instead of turning
      it off entirely. When risk climbs, we lower the actual drop ratio; when
      precision recovers, we slowly restore it back toward the configured base. */
@@ -1434,7 +1444,7 @@ static void adaptive_record_validation(u8 useful, u8 high_freq, u8 novel) {
 
   adaptive_validation_record_t *slot;
 
-  if (!adaptive_gate_initialized) return;
+  if (!adaptive_gate_initialized || !adaptive_gate_enable) return;
 
   /* This ring buffer stores the outcome of shadow validation runs. The same
      samples simultaneously update global precision, high-frequency precision,
@@ -1488,7 +1498,7 @@ static u8 adaptive_should_retrain() {
       /* 新的重新训练政策有意忽略了旧的基于时间的触发机制。
      只有当某个在线质量指标表明已部署的
      模型不再与当前的模糊测试行为一致时，我们才会进行重新训练。 */
-  if (!adaptive_gate_initialized) return 0;
+  if (!adaptive_gate_initialized || !adaptive_online_enable) return 0;
 
   if (adaptive_validation_novel_total >= gate_validation_min_samples &&
       adaptive_novel_false_drop_rate() >= retrain_novel_false_drop_threshold)
@@ -1504,7 +1514,7 @@ static u8 adaptive_should_retrain() {
   else adaptive_retrain_trigger_streak = 0;
 
   if (adaptive_retrain_trigger_streak < retrain_consecutive_triggers) return 0;
-  if (adaptive_last_retrain_time_ms &&
+  if (adaptive_cooldown_enable && adaptive_last_retrain_time_ms &&
       (now_ms - adaptive_last_retrain_time_ms) < retrain_cooldown_minutes * 60ULL * 1000ULL)
     return 0;
 
@@ -4903,19 +4913,19 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     cur_hash = hash32(trace_bits, MAP_SIZE, HASH_CONST); //当前种子的路径的hash值
     hnb = has_new_bits(virgin_bits);
 
-    if (DL_mode) {
+    if (DL_mode && adaptive_metrics_enabled()) {
       u8 new_edges = hnb ? 1 : 0;
       u8 high_freq_path = adaptive_path_is_topk_in_range(cur_hash, 0, adaptive_exec_count);
       u8 novel_path = (!high_freq_path) || new_edges;
 
       adaptive_record_execution(cur_hash, new_edges);
 
-      if (adaptive_pending_validation) {
+      if (adaptive_gate_enable && adaptive_pending_validation) {
         adaptive_record_validation(new_edges, high_freq_path, novel_path);
         adaptive_pending_validation = 0;
       }
 
-      if (adaptive_pending_gain_measure) {
+      if (adaptive_online_enable && adaptive_pending_gain_measure) {
         adaptive_record_gain(new_edges || novel_path);
         adaptive_pending_gain_measure = 0;
       }
@@ -4931,7 +4941,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         //收集种子为训练集，收集成功才能进入下一步训练，并且不再收集，等待收集信号
         if (train_num < TRAIN_DATASET_NUM && !strcmp(stage_name, "havoc")) {
 
-          adaptive_record_training_sample(cur_hash);
+          if (adaptive_online_enable) adaptive_record_training_sample(cur_hash);
 
           if (state_aware_mode && state_aware_train_mode) save_state_aware_to_train_file();
 
@@ -4974,8 +4984,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
             success_flag =1;
 
             success_time = get_cur_time();
-            adaptive_commit_training_distribution();
-            adaptive_gate_reset_model_state();
+            if (adaptive_online_enable) adaptive_commit_training_distribution();
+            if (adaptive_metrics_enabled()) adaptive_gate_reset_model_state();
          
             
           } 
@@ -8052,7 +8062,7 @@ skip_extras:
 
 havoc_stage:
 
-  if (success_flag) {
+  if (success_flag && adaptive_online_enable) {
 
 
     //2h train time and last new path time above 1h
@@ -8068,7 +8078,7 @@ havoc_stage:
 
       train_num    = 0;
       adaptive_reset_staging_training_distribution();
-      adaptive_gate_reset_model_state();
+      if (adaptive_metrics_enabled()) adaptive_gate_reset_model_state();
     }
 
 
@@ -8577,10 +8587,11 @@ havoc_stage:
 
 
     // 高频路径过滤默认保持开启，只是按在线风险动态调节过滤比例，不再使用硬开关全关过滤。
-    if (DL_mode && success_flag && !restart_flag && temp_len < SHM_DATA_SIZE) {
+    if (DL_mode && success_flag && !restart_flag && temp_len < SHM_DATA_SIZE &&
+        adaptive_metrics_enabled()) {
 
       u8 should_execute = 1; //默认执行
-      double target_ratio = adaptive_target_filter_ratio();
+      double target_ratio = adaptive_gate_enable ? adaptive_target_filter_ratio() : 0.0;
       u8 should_use_filter = target_ratio > 0.0;
       u8 inference_sampled = 1; //模型部署后始终打分，避免长期只做极少量采样导致过滤起不来
 
@@ -8590,25 +8601,27 @@ havoc_stage:
       if (inference_sampled && adaptive_request_inference(out_buf, temp_len, &should_execute)) {
 
         if (should_execute) {
-          adaptive_pending_gain_measure = 1;
+          if (adaptive_online_enable) adaptive_pending_gain_measure = 1;
           infer_run++;
           succ_infer = 1;
           goto infer_run;
         }
 
-        adaptive_high_freq_candidate_total++;
-        adaptive_pending_validation = 1;
+        if (adaptive_gate_enable) {
+          adaptive_high_freq_candidate_total++;
+          adaptive_pending_validation = 1;
+        }
 
         // 只有当模型高置信度地把样本判成高频路径时才尝试过滤；其余模糊样本默认放行。
         // if (should_use_filter && adaptive_coin_flip(target_ratio)) {
-        if (should_use_filter) {
+        if (adaptive_gate_enable && should_use_filter) {
           adaptive_high_freq_filtered_total++;
           infer_no_run++;
           total_execs++;
           goto skip_run;
         }
 
-        adaptive_pending_gain_measure = 1;
+        if (adaptive_online_enable) adaptive_pending_gain_measure = 1;
         infer_run++;
         succ_infer = 1;
         goto infer_run;
